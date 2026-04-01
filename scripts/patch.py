@@ -49,7 +49,9 @@ class Patcher:
         with temp_cd(find_src_dir('.', version, release)):
             # Reset to unpatched state first (like "Find broken patches")
             print("Resetting to unpatched state...")
-            run('git clean -fdx && ./mach clobber && git reset --hard unpatched', exit_on_fail=False)
+            # Only run git commands if a git repo exists
+            if os.path.exists('.git'):
+                run('git clean -fdx && ./mach clobber && git reset --hard unpatched', exit_on_fail=False)
 
             # Re-copy additions and settings after reset
             print("Re-copying additions and settings...")
