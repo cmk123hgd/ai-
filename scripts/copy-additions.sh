@@ -55,6 +55,7 @@ run 'cp -r ../additions/* .'
 run 'cp -v ../scripts/mozfetch.sh lw/'
 
 # Override the firefox version
+run 'mkdir -p browser/config'
 for file in "browser/config/version.txt" "browser/config/version_display.txt"; do
     echo "${version}-${release}" > "$file"
 done
