@@ -12,6 +12,8 @@ on:
         required: false
         default: 'x86_64'
   push:
+    branches:
+      - main
     tags:
       - "*"
 
