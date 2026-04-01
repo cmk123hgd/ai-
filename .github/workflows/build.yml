@@ -22,11 +22,8 @@ jobs:
     runs-on: ubuntu-24.04
     strategy:
       matrix:
-        target: [linux, windows]
+        target: [linux]
         arch: [x86_64, arm64]
-        exclude:
-          - target: windows
-            arch: arm64
 
     steps:
       - name: Maximize build space
