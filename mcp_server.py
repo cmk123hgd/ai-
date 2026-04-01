@@ -1667,6 +1667,659 @@ async def storage_set_local_storage(key: str, value: str) -> str:
 
 
 # ============================================================
+# 9. 调试工具集 - Debugger Domain
+# ============================================================
+
+@mcp.tool()
+async def debug_set_breakpoint(url_pattern: str, line_number: int, condition: str = "") -> str:
+    """在指定位置设置断点（通过devtools协议）
+
+    Args:
+        url_pattern: 匹配脚本URL的模式
+        line_number: 行号
+        condition: 条件表达式（可选，满足条件时才断点）
+    """
+    _, page, _ = await _ensure_browser()
+    # 通过CDP设置断点（Firefox的Juggler也支持）
+    try:
+        cdp = await page.context.new_cdp_session(page)
+        result = await cdp.send("Debugger.enable", {})
+        bp = await cdp.send("Debugger.setBreakpointByUrl", {
+            "urlRegex": url_pattern,
+            "lineNumber": line_number,
+            "columnNumber": 0,
+            "condition": condition or None,
+        })
+        return json.dumps({"success": True, "breakpointId": bp.get("breakpointId"), "locations": bp.get("locations")}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e), "note": "CDP Debugger可能不被当前版本支持，可尝试用js_hook_function替代"})
+
+
+@mcp.tool()
+async def debug_set_breakpoint_on_function(function_name: str) -> str:
+    """在指定函数调用时断点（通过Hook实现）
+
+    Args:
+        function_name: 函数名，如 "encrypt", "login", "validateToken"
+    """
+    _, page, _ = await _ensure_browser()
+    result = await page.evaluate(f"""(funcName) => {{
+        // 在全局搜索函数并Hook
+        const hooked = [];
+
+        // 搜索window上的函数
+        const findAndHook = (obj, path) => {{
+            try {{
+                const descriptor = Object.getOwnPropertyDescriptor(obj, funcName);
+                if (descriptor && typeof descriptor.value === 'function') {{
+                    const original = obj[funcName];
+                    obj[funcName] = function(...args) {{
+                        console.log('[BREAKPOINT] ' + path + '.' + funcName + ' called');
+                        console.log('[BREAKPOINT] args:', JSON.stringify(args).substring(0, 500));
+                        console.trace('[BREAKPOINT] call stack:');
+                        // 不阻断执行，只记录
+                        return original.apply(this, args);
+                    }};
+                    obj[funcName].toString = () => original.toString();
+                    hooked.push(path + '.' + funcName);
+                }}
+            }} catch(e) {{}}
+        }};
+
+        findAndHook(window, 'window');
+        // 搜索常见对象
+        ['document', 'navigator', 'localStorage', 'sessionStorage', 'location'].forEach(obj => {{
+            try {{ findAndHook(window[obj], obj); }} catch(e) {{}}
+        }});
+
+        return {{
+            success: hooked.length > 0,
+            hooked: hooked,
+            message: hooked.length > 0
+                ? '已在 ' + hooked.length + ' 个位置设置断点'
+                : '未找到函数 ' + funcName + '，请尝试用 js_hook_function 手动指定路径'
+        }};
+    }}""", function_name)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+async def debug_trace_function_calls(depth: int = 3) -> str:
+    """追踪函数调用链（通过console.trace实现）
+
+    Args:
+        depth: 追踪深度（栈帧数量）
+    """
+    _, page, _ = await _ensure_browser()
+    await page.evaluate(f"""(depth) => {{
+        window.__traceLog = [];
+        const origConsoleTrace = console.trace;
+        console.trace = function(...args) {{
+            const stack = new Error().stack;
+            const frames = stack.split('\\n').slice(1, depth + 2);
+            window.__traceLog.push({{
+                message: args.join(' '),
+                frames: frames,
+                timestamp: Date.now()
+            }});
+            origConsoleTrace.apply(console, args);
+        }};
+    }}""", depth)
+    return json.dumps({"success": True, "message": "调用追踪已启用，调用 get_trace_log 获取日志"})
+
+
+@mcp.tool()
+async def debug_get_trace_log() -> str:
+    """获取函数调用追踪日志"""
+    _, page, _ = await _ensure_browser()
+    result = await page.evaluate("() => window.__traceLog || []")
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def debug_clear_trace_log() -> str:
+    """清空调用追踪日志"""
+    _, page, _ = await _ensure_browser()
+    await page.evaluate("() => { window.__traceLog = []; }")
+    return json.dumps({"success": True})
+
+
+@mcp.tool()
+async def debug_evaluate_and_watch(expression: str, interval_ms: int = 1000) -> str:
+    """持续监控表达式值的变化（类似Chrome的Watch表达式）
+
+    Args:
+        expression: 要监控的JS表达式
+        interval_ms: 检查间隔（毫秒）
+    """
+    _, page, _ = await _ensure_browser()
+    await page.evaluate(f"""(expr, interval) => {{
+        window.__watchExpr = expr;
+        window.__watchInterval = setInterval(() => {{
+            try {{
+                const value = eval(expr);
+                if (window.__watchLastValue !== JSON.stringify(value)) {{
+                    window.__watchLastValue = JSON.stringify(value);
+                    console.log('[WATCH] ' + expr + ' = ' + JSON.stringify(value)?.substring(0, 200));
+                }}
+            }} catch(e) {{}}
+        }}, interval);
+    }}""", expression, interval_ms)
+    return json.dumps({"success": True, "expression": expression, "interval_ms": interval_ms})
+
+
+@mcp.tool()
+async def debug_stop_watch() -> str:
+    """停止监控表达式"""
+    _, page, _ = await _ensure_browser()
+    await page.evaluate("""() => {
+        if (window.__watchInterval) {
+            clearInterval(window.__watchInterval);
+            window.__watchInterval = null;
+        }
+    }""")
+    return json.dumps({"success": True})
+
+
+@mcp.tool()
+async def debug_get_watch_value() -> str:
+    """获取当前Watch表达式的值"""
+    _, page, _ = await _ensure_browser()
+    result = await page.evaluate("""() => {
+        if (!window.__watchExpr) return { error: 'No watch expression set' };
+        try {
+            return {
+                expression: window.__watchExpr,
+                value: eval(window.__watchExpr),
+                last_value: window.__watchLastValue,
+            };
+        } catch(e) {
+            return { expression: window.__watchExpr, error: e.message };
+        }
+    }""")
+    return json.dumps(result, ensure_ascii=False, default=str)
+
+
+@mcp.tool()
+async def debug_log_all_events() -> str:
+    """记录所有DOM事件（用于分析页面交互流程）"""
+    _, page, _ = await _ensure_browser()
+    await page.evaluate("""() => {
+        window.__eventLog = [];
+        const events = [
+            'click', 'dblclick', 'mousedown', 'mouseup', 'mousemove',
+            'keydown', 'keyup', 'keypress', 'input', 'change', 'submit',
+            'focus', 'blur', 'scroll', 'resize', 'load', 'DOMContentLoaded',
+            'error', 'message', 'popstate', 'hashchange',
+            'touchstart', 'touchend', 'touchmove',
+            'dragstart', 'dragend', 'drop',
+            'animationstart', 'animationend', 'transitionend',
+            'fetch', 'xhr', 'promise', 'timeout',
+        ];
+        events.forEach(eventType => {
+            document.addEventListener(eventType, (e) => {
+                window.__eventLog.push({
+                    type: eventType,
+                    target: e.target?.tagName || e.target?.toString()?.substring(0, 50) || 'unknown',
+                    timestamp: Date.now(),
+                    detail: {
+                        x: e.clientX, y: e.clientY,
+                        key: e.key, value: e.target?.value?.substring(0, 100),
+                        url: e.target?.href || e.target?.src || '',
+                    }
+                });
+            }, true); // capture phase
+        });
+    }""")
+    return json.dumps({"success": True, "message": "DOM事件监控已启用，调用 get_event_log 获取日志"})
+
+
+@mcp.tool()
+async def debug_get_event_log(filter_type: str = "") -> str:
+    """获取DOM事件日志
+
+    Args:
+        filter_type: 可选，只返回指定类型的事件
+    """
+    _, page, _ = await _ensure_browser()
+    result = await page.evaluate(f"""(filterType) => {{
+        let log = window.__eventLog || [];
+        if (filterType) log = log.filter(e => e.type === filterType);
+        return log.slice(-100); // 最多返回100条
+    }}""", filter_type)
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def debug_clear_event_log() -> str:
+    """清空DOM事件日志"""
+    _, page, _ = await _ensure_browser()
+    await page.evaluate("() => { window.__eventLog = []; }")
+    return json.dumps({"success": True})
+
+
+@mcp.tool()
+async def debug_performance_profile(duration_ms: int = 5000) -> str:
+    """性能分析（记录指定时间内的性能数据）
+
+    Args:
+        duration_ms: 分析持续时间（毫秒）
+    """
+    _, page, _ = await _ensure_browser()
+    await page.evaluate(f"""(duration) => {{
+        return new Promise(resolve => {{
+            // 开始标记
+            performance.mark('profile-start');
+            setTimeout(() => {{
+                performance.mark('profile-end');
+                performance.measure('profile', 'profile-start', 'profile-end');
+                const measures = performance.getEntriesByType('measure');
+                const resources = performance.getEntriesByType('resource');
+                const longTasks = performance.getEntriesByType('longtask');
+                resolve({{
+                    duration: duration,
+                    profile_time: measures[0]?.duration,
+                    long_tasks: longTasks.map(t => ({{
+                        duration: Math.round(t.duration),
+                        start: Math.round(t.startTime),
+                        name: t.name,
+                    }})),
+                    slow_resources: resources
+                        .filter(r => r.duration > 100)
+                        .map(r => ({{
+                            name: r.name.substring(0, 200),
+                            duration: Math.round(r.duration),
+                            type: r.initiatorType,
+                            size: r.transferSize || 0,
+                        }}))
+                        .sort((a, b) => b.duration - a.duration)
+                        .slice(0, 20),
+                    total_resources: resources.length,
+                    total_transfer_size: resources.reduce((s, r) => s + (r.transferSize || 0), 0),
+                }});
+            }}, duration);
+        }});
+    }}""", duration_ms)
+    result = await page.evaluate("""() => window.__profileResult""")
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def debug_memory_snapshot() -> str:
+    """获取内存快照（堆内存分析）"""
+    _, page, _ = await _ensure_browser()
+    result = await page.evaluate("""() => {
+        const info = {};
+        // performance.memory (Chrome only)
+        if (performance.memory) {
+            info.jsHeap = {
+                used: Math.round(performance.memory.usedJSHeapSize / 1024 / 1024) + 'MB',
+                total: Math.round(performance.memory.totalJSHeapSize / 1024 / 1024) + 'MB',
+                limit: Math.round(performance.memory.jsHeapSizeLimit / 1024 / 1024) + 'MB',
+            };
+        }
+        // 全局对象统计
+        const globalKeys = Object.keys(window).length;
+        const documentNodes = document.querySelectorAll('*').length;
+        const iframeCount = window.frames.length;
+        const listenerCount = getEventListeners ? Object.keys(getEventListeners(document)).length : 'N/A';
+
+        info.page = {
+            globalKeys,
+            domNodes: documentNodes,
+            iframes: iframeCount,
+            listenerCount,
+        };
+
+        // 检测内存泄漏迹象
+        const timers = setTimeout(() => {}, 0) - 1;
+        info.timers = { setTimeout: timers };
+
+        return info;
+    }""")
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def debug_network_throttle(download_kbps: int = 1500, upload_kbps: int = 1500, latency_ms: int = 100) -> str:
+    """网络限速（模拟慢速网络）
+
+    Args:
+        download_kbps: 下载速度（kbps），0=不限速
+        upload_kbps: 上传速度（kbps）
+        latency_ms: 延迟（毫秒）
+    """
+    _, _, context = await _ensure_browser()
+    # Playwright的emulateNetwork需要CDP
+    try:
+        cdp = await context.new_cdp_session(_page)
+        await cdp.send("Network.enable")
+        await cdp.send("Network.emulateNetworkConditions", {
+            "offline": False,
+            "latency": latency_ms,
+            "downloadThroughput": download_kbps * 1024 / 8,
+            "uploadThroughput": upload_kbps * 1024 / 8,
+        })
+        return json.dumps({"success": True, "download": f"{download_kbps}kbps", "upload": f"{upload_kbps}kbps", "latency": f"{latency_ms}ms"})
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)})
+
+
+@mcp.tool()
+async def debug_cpu_throttle(rate: float = 4.0) -> str:
+    """CPU限速（模拟慢速CPU）
+
+    Args:
+        rate: 减速倍率，4.0=4倍慢
+    """
+    _, page, _ = await _ensure_browser()
+    try:
+        cdp = await page.context.new_cdp_session(page)
+        await cdp.send("Emulation.setCPUThrottlingRate", {"rate": rate})
+        return json.dumps({"success": True, "rate": rate})
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)})
+
+
+@mcp.tool()
+async def debug_override_css_media(media: str = "print") -> str:
+    """覆盖CSS媒体查询（模拟打印/暗色模式等）
+
+    Args:
+        media: 媒体类型 - print/screen/forced-colors
+    """
+    _, page, _ = await _ensure_browser()
+    await page.emulate_media(media=media)
+    return json.dumps({"success": True, "media": media})
+
+
+@mcp.tool()
+async def debug_set_dark_mode(enabled: bool = True) -> str:
+    """切换暗色模式
+
+    Args:
+        enabled: True=暗色, False=亮色
+    """
+    _, page, _ = await _ensure_browser()
+    await page.emulate_media(color_scheme="dark" if enabled else "light")
+    return json.dumps({"success": True, "dark_mode": enabled})
+
+
+@mcp.tool()
+async def debug_set_geolocation_override(latitude: float, longitude: float, accuracy: float = 100) -> str:
+    """覆盖地理位置（调试用）
+
+    Args:
+        latitude: 纬度
+        longitude: 经度
+        accuracy: 精度（米）
+    """
+    _, _, context = await _ensure_browser()
+    await context.set_geolocation({"latitude": latitude, "longitude": longitude, "accuracy": accuracy})
+    await context.grant_permissions(["geolocation"])
+    return json.dumps({"success": True})
+
+
+@mcp.tool()
+async def debug_inspect_element(selector: str) -> str:
+    """检查元素详细信息（类似Chrome DevTools的Elements面板）
+
+    Args:
+        selector: CSS选择器
+    """
+    _, page, _ = await _ensure_browser()
+    result = await page.evaluate(f"""(selector) => {{
+        const el = document.querySelector(selector);
+        if (!el) return {{ error: 'Element not found: ' + selector }};
+
+        const rect = el.getBoundingClientRect();
+        const computed = getComputedStyle(el);
+        const listeners = typeof getEventListeners === 'function'
+            ? getEventListeners(el) : {{}};
+
+        return {{
+            tag: el.tagName,
+            id: el.id || null,
+            className: el.className || null,
+            attributes: Array.from(el.attributes).map(a => ({{ name: a.name, value: a.value?.substring(0, 200) }})),
+            textContent: el.textContent?.substring(0, 500),
+            innerHTML: el.innerHTML?.substring(0, 1000),
+            rect: {{
+                top: Math.round(rect.top),
+                left: Math.round(rect.left),
+                width: Math.round(rect.width),
+                height: Math.round(rect.height),
+            }},
+            computedStyle: {{
+                display: computed.display,
+                visibility: computed.visibility,
+                opacity: computed.opacity,
+                position: computed.position,
+                zIndex: computed.zIndex,
+                overflow: computed.overflow,
+                margin: computed.margin,
+                padding: computed.padding,
+                border: computed.border,
+                color: computed.color,
+                backgroundColor: computed.backgroundColor,
+                fontSize: computed.fontSize,
+                fontWeight: computed.fontWeight,
+                fontFamily: computed.fontFamily,
+                lineHeight: computed.lineHeight,
+                textAlign: computed.textAlign,
+                cursor: computed.cursor,
+                pointerEvents: computed.pointerEvents,
+                transform: computed.transform,
+                transition: computed.transition,
+            }},
+            eventListeners: Object.keys(listeners).map(type => ({{
+                type,
+                count: listeners[type]?.length || 0,
+            }})),
+            children: el.children.length,
+            parent: el.parentElement?.tagName,
+            dataAttributes: Array.from(el.attributes)
+                .filter(a => a.name.startsWith('data-'))
+                .map(a => ({{ name: a.name, value: a.value }})),
+        }};
+    }}""", selector)
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def debug_get_box_model(selector: str) -> str:
+    """获取元素的盒模型（类似Chrome DevTools的Box Model）
+
+    Args:
+        selector: CSS选择器
+    """
+    _, page, _ = await _ensure_browser()
+    result = await page.evaluate(f"""(selector) => {{
+        const el = document.querySelector(selector);
+        if (!el) return {{ error: 'Element not found' }};
+        const computed = getComputedStyle(el);
+        const parse = (v) => v ? parseInt(v) : 0;
+        return {{
+            content: {{
+                width: el.clientWidth,
+                height: el.clientHeight,
+            }},
+            padding: {{
+                top: parse(computed.paddingTop),
+                right: parse(computed.paddingRight),
+                bottom: parse(computed.paddingBottom),
+                left: parse(computed.paddingLeft),
+            }},
+            border: {{
+                top: parse(computed.borderTopWidth),
+                right: parse(computed.borderRightWidth),
+                bottom: parse(computed.borderBottomWidth),
+                left: parse(computed.borderLeftWidth),
+            }},
+            margin: {{
+                top: parse(computed.marginTop),
+                right: parse(computed.marginRight),
+                bottom: parse(computed.marginBottom),
+                left: parse(computed.marginLeft),
+            }},
+        }};
+    }}""", selector)
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def debug_get_matched_css_rules(selector: str) -> str:
+    """获取匹配元素的所有CSS规则（类似Chrome DevTools的Styles面板）
+
+    Args:
+        selector: CSS选择器
+    """
+    _, page, _ = await _ensure_browser()
+    result = await page.evaluate(f"""(selector) => {{
+        const el = document.querySelector(selector);
+        if (!el) return {{ error: 'Element not found' }};
+
+        const rules = [];
+        const sheets = document.styleSheets;
+        for (let i = 0; i < sheets.length; i++) {{
+            try {{
+                const cssRules = sheets[i].cssRules || sheets[i].rules;
+                for (let j = 0; j < cssRules.length; j++) {{
+                    const rule = cssRules[j];
+                    if (rule.type === CSSRule.STYLE_RULE) {{
+                        try {{
+                            if (el.matches(rule.selectorText)) {{
+                                rules.push({{
+                                    selector: rule.selectorText,
+                                    source: sheets[i].href?.substring(0, 100) || 'inline',
+                                    style: rule.cssText?.substring(0, 500),
+                                    specificity: CSS specificity ? null : 'N/A',
+                                }});
+                            }}
+                        }} catch(e) {{ /* invalid selector */ }}
+                    }}
+                }}
+            }} catch(e) {{ /* cross-origin */ }}
+        }}
+        return rules.slice(0, 30);
+    }}""", selector)
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def debug_console_override() -> str:
+    """拦截所有console输出（console.log/warn/error/info/table）
+
+    Returns:
+        拦截已安装，后续调用 get_console_override_log 获取日志
+    """
+    _, page, _ = await _ensure_browser()
+    await page.evaluate("""() => {
+        window.__consoleLog = [];
+        const methods = ['log', 'warn', 'error', 'info', 'debug', 'table', 'dir', 'group', 'groupEnd', 'time', 'timeEnd', 'assert', 'count', 'clear'];
+        methods.forEach(method => {
+            const orig = console[method];
+            console[method] = function(...args) {
+                window.__consoleLog.push({
+                    method,
+                    args: args.map(a => {
+                        if (typeof a === 'object') {
+                            try { return JSON.stringify(a)?.substring(0, 500); }
+                            catch(e) { return String(a).substring(0, 200); }
+                        }
+                        return String(a).substring(0, 500);
+                    }),
+                    stack: new Error().stack?.split('\\n').slice(1, 4),
+                    timestamp: Date.now(),
+                });
+                orig.apply(console, args);
+            };
+        });
+    }""")
+    return json.dumps({"success": True, "message": "console拦截已安装"})
+
+
+@mcp.tool()
+async def debug_get_console_override_log(method_filter: str = "") -> str:
+    """获取拦截的console日志
+
+    Args:
+        method_filter: 可选，只返回指定方法（log/warn/error/info）
+    """
+    _, page, _ = await _ensure_browser()
+    result = await page.evaluate(f"""(filter) => {{
+        let log = window.__consoleLog || [];
+        if (filter) log = log.filter(e => e.method === filter);
+        return log.slice(-100);
+    }}""", method_filter)
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def debug_execute_with_cdp(expression: str) -> str:
+    """通过CDP直接执行JS（绕过页面上下文限制）
+
+    Args:
+        expression: JS表达式
+    """
+    _, page, _ = await _ensure_browser()
+    try:
+        cdp = await page.context.new_cdp_session(page)
+        result = await cdp.send("Runtime.evaluate", {
+            "expression": expression,
+            "returnByValue": True,
+        })
+        return json.dumps(result, ensure_ascii=False, default=str)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+async def debug_get_source_map(url: str = "") -> str:
+    """获取页面的Source Map信息
+
+    Args:
+        url: 可选，指定脚本URL
+    """
+    _, page, _ = await _ensure_browser()
+    result = await page.evaluate(f"""(url) => {{
+        const scripts = Array.from(document.querySelectorAll('script[src]'));
+        const targets = url ? scripts.filter(s => s.src.includes(url)) : scripts;
+        return targets.map(s => ({{
+            src: s.src,
+            sourceMap: s.src + '.map',
+        }}));
+    }}""", url)
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def debug_set_device_emulation(device: str = "iPhone 13") -> str:
+    """模拟设备（手机/平板）
+
+    Args:
+        device: 设备名 - iPhone 13 / iPad Pro / Pixel 5 / Galaxy S21
+    """
+    devices = {
+        "iPhone 13": {"width": 390, "height": 844, "ua": "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X)", "dpr": 3, "touch": True},
+        "iPad Pro": {"width": 1024, "height": 1366, "ua": "Mozilla/5.0 (iPad; CPU OS 15_0 like Mac OS X)", "dpr": 2, "touch": True},
+        "Pixel 5": {"width": 393, "height": 851, "ua": "Mozilla/5.0 (Linux; Android 12; Pixel 5)", "dpr": 2.625, "touch": True},
+        "Galaxy S21": {"width": 360, "height": 800, "ua": "Mozilla/5.0 (Linux; Android 11; SM-G991B)", "dpr": 3, "touch": True},
+    }
+    if device not in devices:
+        return json.dumps({"error": f"未知设备: {device}，可选: {', '.join(devices.keys())}"})
+
+    d = devices[device]
+    _, _, context = await _ensure_browser()
+    global _page
+    await context.set_viewport_size({"width": d["width"], "height": d["height"]})
+    await context.set_user_agent(d["ua"])
+    await context.set_extra_http_headers({"Sec-CH-UA-Mobile": "?1"})
+    _page = await context.new_page()
+    return json.dumps({"success": True, "device": device, **d})
+
+
+# ============================================================
 # 启动
 # ============================================================
 
