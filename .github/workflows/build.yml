@@ -23,7 +23,7 @@ jobs:
     strategy:
       matrix:
         target: [linux, windows]
-        arch: [x86_64, arm64, i686]
+        arch: [x86_64, arm64]
         exclude:
           - target: windows
             arch: arm64
