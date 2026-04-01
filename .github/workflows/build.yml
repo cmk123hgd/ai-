@@ -55,7 +55,7 @@ jobs:
           sudo apt-get autoremove -y > /dev/null
           sudo apt-get clean > /dev/null
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v2
         with:
           fetch-depth: 1
 

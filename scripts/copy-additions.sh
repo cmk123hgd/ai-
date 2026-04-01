@@ -24,9 +24,11 @@ run() {
 }
 
 # Copy the search-config.json file
+run 'mkdir -p services/settings/dumps/main'
 run 'cp -v ../assets/search-config.json services/settings/dumps/main/search-config.json'
 
 # vs_pack.py issue... should be temporary
+run 'mkdir -p build/vs'
 run 'cp -v ../patches/librewolf/pack_vs.py build/vs/'
 
 # Apply most recent `settings` repository files
