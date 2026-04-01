@@ -11,6 +11,11 @@ on:
         description: '架构 (逗号分隔: x86_64,arm64,i686)'
         required: false
         default: 'x86_64'
+      clean:
+        description: '全量重新编译（忽略缓存）'
+        required: false
+        type: boolean
+        default: false
   push:
     branches:
       - main
@@ -58,6 +63,43 @@ jobs:
         with:
           fetch-depth: 1
 
+      # === 缓存1: Firefox源码包 (~500MB) ===
+      - name: Cache Firefox source tarball
+        uses: actions/cache@v4
+        with:
+          path: firefox-*.source.tar.xz
+          key: firefox-source-${{ hashFiles('upstream.sh') }}
+          restore-keys: |
+            firefox-source-
+
+      # === 缓存2: .mozbuild工具链 (~2GB) ===
+      - name: Cache mozbuild toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.mozbuild
+          key: mozbuild-clang18-${{ matrix.arch }}-v1
+          restore-keys: |
+            mozbuild-clang18-${{ matrix.arch }}-
+
+      # === 缓存3: 解压后的源码目录 (~5GB) ===
+      - name: Cache extracted source
+        uses: actions/cache@v4
+        with:
+          path: camoufox-*
+          key: source-${{ hashFiles('upstream.sh') }}-${{ hashFiles('patches/**', 'additions/**', 'scripts/**') }}
+          restore-keys: |
+            source-${{ hashFiles('upstream.sh') }}-
+
+      # === 缓存4: 编译产物 (~15GB) ===
+      - name: Cache build output
+        if: ${{ !inputs.clean }}
+        uses: actions/cache@v4
+        with:
+          path: camoufox-*/obj-*
+          key: build-${{ matrix.target }}-${{ matrix.arch }}-${{ hashFiles('patches/**', 'additions/**') }}
+          restore-keys: |
+            build-${{ matrix.target }}-${{ matrix.arch }}-
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -70,9 +112,11 @@ jobs:
 
       - name: Set up LLVM
         run: |
-          wget https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 18
+          if ! command -v clang-18 &> /dev/null; then
+            wget https://apt.llvm.org/llvm.sh
+            chmod +x llvm.sh
+            sudo ./llvm.sh 18
+          fi
           sudo apt-get install -y lld-18 clang-18
           if [ "${{ matrix.arch }}" != "x86_64" ]; then
             sudo apt-get install -y libc6-i386 lib32gcc-s1 lib32stdc++6 gcc-multilib g++-multilib
@@ -88,8 +132,7 @@ jobs:
           sudo apt-get install -y msitools p7zip-full aria2
 
       - name: Fetch source
-        run: |
-          make fetch
+        run: make fetch
 
       - name: Setup and bootstrap
         run: |
@@ -107,6 +150,8 @@ jobs:
 
       - name: Build
         run: python3 ./multibuild.py --target ${{ matrix.target }} --arch ${{ matrix.arch }}
+        env:
+          CAMOUFOX_INCREMENTAL: ${{ inputs.clean == 'false' && '1' || '0' }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

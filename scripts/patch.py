@@ -47,10 +47,15 @@ class Patcher:
         """
         version, release = extract_args()
         with temp_cd(find_src_dir('.', version, release)):
-            # Reset to unpatched state first (like "Find broken patches")
-            print("Resetting to unpatched state...")
-            # Only run git commands if a git repo exists
-            if os.path.exists('.git'):
+            # Check if incremental build is possible (cached build output exists)
+            obj_dirs = [d for d in os.listdir('.') if d.startswith('obj-') and os.path.isdir(d)]
+            incremental = len(obj_dirs) > 0 and os.environ.get('CAMOUFOX_INCREMENTAL', '1') == '1'
+
+            if incremental:
+                print("Incremental build: skipping git clean/reset, re-applying patches only...")
+            elif os.path.exists('.git'):
+                # Reset to unpatched state first (like "Find broken patches")
+                print("Resetting to unpatched state...")
                 run('git clean -fdx && ./mach clobber && git reset --hard unpatched', exit_on_fail=False)
 
             # Re-copy additions and settings after reset
