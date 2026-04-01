@@ -2,6 +2,15 @@ name: Build and Release
 
 on:
   workflow_dispatch:
+    inputs:
+      targets:
+        description: '构建目标 (逗号分隔: linux,windows,macos)'
+        required: false
+        default: 'linux,windows'
+      archs:
+        description: '架构 (逗号分隔: x86_64,arm64,i686)'
+        required: false
+        default: 'x86_64'
   push:
     tags:
       - "*"
@@ -14,10 +23,8 @@ jobs:
         target: [linux, windows, macos]
         arch: [x86_64, arm64, i686]
         exclude:
-          # Fails (.mozbuild does not include clang++-cl)
           - target: windows
             arch: arm64
-          # Unsuported
           - target: macos
             arch: i686
 
@@ -35,7 +42,6 @@ jobs:
           verbose: "false"
 
       - name: Remove unwanted tools
-        # Originally from here: https://github.com/AdityaGarg8/remove-unwanted-software/blob/master/action.yml
         run: |
           sudo apt-get remove -y '^aspnetcore-.*' > /dev/null
           sudo apt-get remove -y '^dotnet-.*' > /dev/null
@@ -51,17 +57,17 @@ jobs:
           sudo apt-get autoremove -y > /dev/null
           sudo apt-get clean > /dev/null
 
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
       - name: Set up Go
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v5
         with:
           go-version: "1.23"
 
       - name: Set up Python
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -85,8 +91,6 @@ jobs:
           sudo apt-get install -y msitools p7zip-full aria2
 
       - name: Fetch source
-        env:
-          CAMOUFOX_PASSWD: ${{ secrets.CAMOUFOX_PASSWD }}
         run: |
           make fetch
 
